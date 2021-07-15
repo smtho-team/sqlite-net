@@ -49,6 +49,7 @@ using Sqlite3DatabaseHandle = SQLitePCL.sqlite3;
 using Sqlite3BackupHandle = SQLitePCL.sqlite3_backup;
 using Sqlite3Statement = SQLitePCL.sqlite3_stmt;
 using Sqlite3 = SQLitePCL.raw;
+using static SQLite.ConverterUtil;
 #else
 using Sqlite3DatabaseHandle = System.IntPtr;
 using Sqlite3BackupHandle = System.IntPtr;
@@ -157,6 +158,48 @@ namespace SQLite
 		/// Create virtual table using FTS4
 		/// </summary>
 		FullTextSearch4 = 0x200
+	}
+
+	public class ConverterUtil
+	{
+		private static object converterLock = new object ();
+
+		public class ConverterInfo
+		{
+			public object Instance { get; set; }
+			public MethodInfo ConverterMethodInfo { get; set; }
+			public MethodInfo UnconverterMethodInfo { get; set; }
+
+			public object Convert (object o)
+			{
+				return ConverterMethodInfo.Invoke (Instance, new object[] { o });
+			}
+
+			public object Unconvert (object o)
+			{
+				return UnconverterMethodInfo.Invoke (Instance, new object[] { o });
+			}
+		}
+
+		private static Dictionary<Type, ConverterInfo> converterDic = new Dictionary<Type, ConverterInfo> ();
+
+		public static ConverterInfo GetConverter (Type type)
+		{
+			if (!converterDic.ContainsKey (type)) {
+				lock (converterLock) {
+					if (!converterDic.ContainsKey (type)) {
+						ConverterInfo converterInfo = new ConverterInfo () {
+							Instance = Activator.CreateInstance (type),
+							ConverterMethodInfo = type.GetMethod ("Convert"),
+							UnconverterMethodInfo = type.GetMethod ("Unconvert")
+						};
+
+						converterDic.Add (type, converterInfo);
+					}
+				}
+			}
+			return converterDic[type];
+		}
 	}
 
 	/// <summary>
@@ -1747,8 +1790,8 @@ namespace SQLite
 			var vals = new object[cols.Length];
 			for (var i = 0; i < vals.Length; i++) {
 				if (cols[i].Converter != null) {
-					dynamic ccc = Activator.CreateInstance (cols[i].Converter);
-					vals[i] = ccc.Convert ((dynamic)cols[i].GetValue (obj));
+					ConverterUtil.ConverterInfo converterInfo = ConverterUtil.GetConverter (cols[i].Converter);
+					vals[i] = converterInfo.Convert (cols[i].GetValue (obj));
 				}
 				else {
 					vals[i] = cols[i].GetValue (obj);
@@ -1887,8 +1930,14 @@ namespace SQLite
 			var cols = from p in map.Columns
 					   where p != pk
 					   select p;
-			var vals = from c in cols
-					   select c.GetValue (obj);
+			var vals = cols.Select (c => {
+				if (c.Converter != null) {
+					ConverterUtil.ConverterInfo converterInfo = ConverterUtil.GetConverter (c.Converter);
+					return converterInfo.Convert (c.GetValue (obj));
+				}
+				return c.GetValue (obj);
+			});
+
 			var ps = new List<object> (vals);
 			if (ps.Count == 0) {
 				// There is a PK but no accompanying data,
@@ -2432,7 +2481,7 @@ namespace SQLite
 	{
 	}
 
-	public interface Converter<S, T>
+	public interface IConverter<S, T>
 	{
 		S Convert (T t);
 		T Unconvert (S s);
@@ -2981,8 +3030,20 @@ namespace SQLite
 							fastColumnSetters[i].Invoke ((T)obj, stmt, i);
 						}
 						else {
+							Type clrType;
+							if (cols[i].Converter != null) {
+								Type[] genericArguments = cols[i].Converter.GetInterfaces ()[0].GetGenericArguments ();
+								clrType = genericArguments[0];
+							}
+							else {
+								clrType = cols[i].ColumnType;
+							}
 							var colType = SQLite3.ColumnType (stmt, i);
-							var val = ReadCol (stmt, i, colType, cols[i].ColumnType, cols[i].Converter);
+							var val = ReadCol (stmt, i, colType, clrType);
+							if (cols[i].Converter != null) {
+								ConverterUtil.ConverterInfo converterInfo = ConverterUtil.GetConverter (cols[i].Converter);
+								val = converterInfo.Unconvert (val);
+							}
 							cols[i].SetValue (obj, val);
 						}
 					}
@@ -3192,7 +3253,7 @@ namespace SQLite
 			public int Index { get; set; }
 		}
 
-		object ReadCol (Sqlite3Statement stmt, int index, SQLite3.ColType type, Type clrType, Type converter = null)
+		object ReadCol (Sqlite3Statement stmt, int index, SQLite3.ColType type, Type clrType)
 		{
 			if (type == SQLite3.ColType.Null) {
 				return null;
@@ -3202,10 +3263,6 @@ namespace SQLite
 				if (clrTypeInfo.IsGenericType && clrTypeInfo.GetGenericTypeDefinition () == typeof (Nullable<>)) {
 					clrType = clrTypeInfo.GenericTypeArguments[0];
 					clrTypeInfo = clrType.GetTypeInfo ();
-				}
-				if (converter != null) {
-					dynamic ccc = Activator.CreateInstance (converter);
-					return ccc.Unconvert (SQLite3.ColumnString (stmt, index));
 				}
 				if (clrType == typeof (String)) {
 					return SQLite3.ColumnString (stmt, index);
@@ -4473,62 +4530,62 @@ namespace SQLite
 			return Marshal.PtrToStringUni (Errmsg (db));
 		}
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_bind_parameter_index", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_bind_parameter_index", CallingConvention = CallingConvention.Cdecl)]
 		public static extern int BindParameterIndex (IntPtr stmt, [MarshalAs (UnmanagedType.LPStr)] string name);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_bind_null", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_bind_null", CallingConvention = CallingConvention.Cdecl)]
 		public static extern int BindNull (IntPtr stmt, int index);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_bind_int", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_bind_int", CallingConvention = CallingConvention.Cdecl)]
 		public static extern int BindInt (IntPtr stmt, int index, int val);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_bind_int64", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_bind_int64", CallingConvention = CallingConvention.Cdecl)]
 		public static extern int BindInt64 (IntPtr stmt, int index, long val);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_bind_double", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_bind_double", CallingConvention = CallingConvention.Cdecl)]
 		public static extern int BindDouble (IntPtr stmt, int index, double val);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_bind_text16", CallingConvention=CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_bind_text16", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
 		public static extern int BindText (IntPtr stmt, int index, [MarshalAs (UnmanagedType.LPWStr)] string val, int n, IntPtr free);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_bind_blob", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_bind_blob", CallingConvention = CallingConvention.Cdecl)]
 		public static extern int BindBlob (IntPtr stmt, int index, byte[] val, int n, IntPtr free);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_column_count", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_column_count", CallingConvention = CallingConvention.Cdecl)]
 		public static extern int ColumnCount (IntPtr stmt);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_column_name", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_column_name", CallingConvention = CallingConvention.Cdecl)]
 		public static extern IntPtr ColumnName (IntPtr stmt, int index);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_column_name16", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_column_name16", CallingConvention = CallingConvention.Cdecl)]
 		static extern IntPtr ColumnName16Internal (IntPtr stmt, int index);
 		public static string ColumnName16 (IntPtr stmt, int index)
 		{
 			return Marshal.PtrToStringUni (ColumnName16Internal (stmt, index));
 		}
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_column_type", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_column_type", CallingConvention = CallingConvention.Cdecl)]
 		public static extern ColType ColumnType (IntPtr stmt, int index);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_column_int", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_column_int", CallingConvention = CallingConvention.Cdecl)]
 		public static extern int ColumnInt (IntPtr stmt, int index);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_column_int64", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_column_int64", CallingConvention = CallingConvention.Cdecl)]
 		public static extern long ColumnInt64 (IntPtr stmt, int index);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_column_double", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_column_double", CallingConvention = CallingConvention.Cdecl)]
 		public static extern double ColumnDouble (IntPtr stmt, int index);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_column_text", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_column_text", CallingConvention = CallingConvention.Cdecl)]
 		public static extern IntPtr ColumnText (IntPtr stmt, int index);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_column_text16", CallingConvention=CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_column_text16", CallingConvention = CallingConvention.Cdecl)]
 		public static extern IntPtr ColumnText16 (IntPtr stmt, int index);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_column_blob", CallingConvention = CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_column_blob", CallingConvention = CallingConvention.Cdecl)]
 		public static extern IntPtr ColumnBlob (IntPtr stmt, int index);
 
-		[DllImport(LibraryPath, EntryPoint = "sqlite3_column_bytes", CallingConvention = CallingConvention.Cdecl)]
+		[DllImport (LibraryPath, EntryPoint = "sqlite3_column_bytes", CallingConvention = CallingConvention.Cdecl)]
 		public static extern int ColumnBytes (IntPtr stmt, int index);
 
 		public static string ColumnString (IntPtr stmt, int index)
