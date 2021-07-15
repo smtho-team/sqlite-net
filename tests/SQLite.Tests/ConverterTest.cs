@@ -25,8 +25,9 @@ namespace SQLite.Tests
 		{
 			[PrimaryKey, AutoIncrement]
 			public int Id { get; set; }
-			[Column ("Readers", Converter = typeof (ListStringConverter))]
+			[Column (Converter = typeof (ListStringConverter))]
 			public List<string> Readers { get; set; }
+			public int Age { get; set; }
 		}
 
 		[Test]
