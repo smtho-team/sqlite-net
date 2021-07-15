@@ -183,7 +183,7 @@ namespace SQLite
 
 		private static Dictionary<Type, ConverterInfo> converterDic = new Dictionary<Type, ConverterInfo> ();
 
-		public static ConverterInfo GetConverter (Type type)
+		public static ConverterInfo GetConverterInfo (Type type)
 		{
 			if (!converterDic.ContainsKey (type)) {
 				lock (converterLock) {
@@ -1790,7 +1790,7 @@ namespace SQLite
 			var vals = new object[cols.Length];
 			for (var i = 0; i < vals.Length; i++) {
 				if (cols[i].Converter != null) {
-					ConverterUtil.ConverterInfo converterInfo = ConverterUtil.GetConverter (cols[i].Converter);
+					ConverterUtil.ConverterInfo converterInfo = ConverterUtil.GetConverterInfo (cols[i].Converter);
 					vals[i] = converterInfo.Convert (cols[i].GetValue (obj));
 				}
 				else {
@@ -1932,7 +1932,7 @@ namespace SQLite
 					   select p;
 			var vals = cols.Select (c => {
 				if (c.Converter != null) {
-					ConverterUtil.ConverterInfo converterInfo = ConverterUtil.GetConverter (c.Converter);
+					ConverterUtil.ConverterInfo converterInfo = ConverterUtil.GetConverterInfo (c.Converter);
 					return converterInfo.Convert (c.GetValue (obj));
 				}
 				return c.GetValue (obj);
@@ -2389,7 +2389,7 @@ namespace SQLite
 		public string Name { get; set; }
 		public Type Converter { get; set; }
 
-		public ColumnAttribute (string name, Type converter = null)
+		public ColumnAttribute (string name = null, Type converter = null)
 		{
 			this.Name = name;
 			this.Converter = converter;
@@ -2643,7 +2643,6 @@ namespace SQLite
 			public Column (PropertyInfo prop, CreateFlags createFlags = CreateFlags.None)
 			{
 				var colAttr = prop.CustomAttributes.FirstOrDefault (x => x.AttributeType == typeof (ColumnAttribute));
-
 				_prop = prop;
 #if ENABLE_IL2CPP
                 var ca = prop.GetCustomAttribute(typeof(ColumnAttribute)) as ColumnAttribute;
@@ -2653,6 +2652,7 @@ namespace SQLite
 						colAttr.ConstructorArguments[0].Value?.ToString () :
 						prop.Name;
 #endif
+				Name = Name ?? prop.Name;
 				//If this type is Nullable<T> then Nullable.GetUnderlyingType returns the T, otherwise it returns null, so get the actual type instead
 				ColumnType = Nullable.GetUnderlyingType (prop.PropertyType) ?? prop.PropertyType;
 				Collation = Orm.Collation (prop);
@@ -3041,7 +3041,7 @@ namespace SQLite
 							var colType = SQLite3.ColumnType (stmt, i);
 							var val = ReadCol (stmt, i, colType, clrType);
 							if (cols[i].Converter != null) {
-								ConverterUtil.ConverterInfo converterInfo = ConverterUtil.GetConverter (cols[i].Converter);
+								ConverterUtil.ConverterInfo converterInfo = ConverterUtil.GetConverterInfo (cols[i].Converter);
 								val = converterInfo.Unconvert (val);
 							}
 							cols[i].SetValue (obj, val);
